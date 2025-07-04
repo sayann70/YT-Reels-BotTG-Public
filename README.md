@@ -23,8 +23,7 @@ A powerful Telegram bot built with Python that downloads **Instagram Reels/Posts
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/sayann70/YT-Reels-BotTG
-cd YT-Reels-BotTG
+https://github.com/sayann70/YT-Reels-BotTG-Public YT-Reels-BotTG && cd YT-Reels-BotTG
 ```
 
 ### 2. Install Dependencies
