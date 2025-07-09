@@ -23,7 +23,7 @@ A powerful Telegram bot built with Python that downloads **Instagram Reels/Posts
 ### 1. Clone the Repository
 
 ```bash
-https://github.com/sayann70/YT-Reels-BotTG-Public YT-Reels-BotTG && cd YT-Reels-BotTG
+git clone https://github.com/sayann70/YT-Reels-BotTG-Public YT-Reels-BotTG && cd YT-Reels-BotTG
 ```
 
 ### 2. Install Dependencies
@@ -38,6 +38,7 @@ pip install -r requirements.txt
 - `httpx`
 - `Pillow`
 - `requests`
+- [Unofficial API for YouTube & YouTube Music](https://github.com/sigma67/ytmusicapi)
 
 ### 3. Set Your Bot Token
 
@@ -83,6 +84,7 @@ Videos exceeding Telegram's 50MB limit are uploaded to [Gofile.io](https://gofil
 - **httpx**
 - **Pillow**
 - **requests**
+- **[Unofficial API for YouTube & YouTube Music](https://github.com/sigma67/ytmusicapi)**
 
 ---
 

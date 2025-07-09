@@ -1,0 +1,6 @@
+python-telegram-bot
+httpx
+Pillow
+requests
+yt-dlp
+git+https://github.com/sigma67/ytmusicapi.git#egg=ytmusicapi
