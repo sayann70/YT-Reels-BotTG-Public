@@ -205,7 +205,22 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Send a valid URL from Instagram, YouTube, or YouTube Music and I'll download the content for you.")
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles incoming text messages. It only processes messages containing valid URLs
+    and ignores all other messages.
+    """
+    # Ignore updates that are not new messages with text
+    if not update.message or not update.message.text:
+        return
+
     url = update.message.text.strip()
+
+    # Check if the message contains a valid URL pattern. If not, log it and do nothing.
+    if not re.search(r"(instagram\.com|youtube\.com|youtu\.be|music\.youtube\.com)", url):
+        user = update.message.from_user
+        logger.info(f"Ignoring non-URL message from user {user.username} (ID: {user.id}): '{update.message.text}'")
+        return
+
     temp_dir = None
     msg = None
 
@@ -248,8 +263,7 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
             else:
                 await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="⚠️ Failed to download the content.")
-        else:
-            await update.message.reply_text("Please send a valid URL from Instagram, YouTube, or YouTube Music.")
+        # No 'else' block is needed, as non-URL messages are filtered out at the start.
 
     except Exception as e:
         logger.error(f"An error occurred in url_handler: {e}", exc_info=True)
