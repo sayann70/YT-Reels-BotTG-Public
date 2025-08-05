@@ -11,12 +11,16 @@ import httpx
 from urllib.parse import urlparse, parse_qs
 from PIL import Image
 import random
+from dotenv import load_dotenv
 import pathlib
 from ytmusicapi import YTMusic
 import yt_dlp
 
+# --- Load .env file ---
+load_dotenv()
+
 # --- Configuration ---
-BOT_TOKEN = "ENTER_YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAX_PLAYLIST_SIZE = 50  # Limit playlist size to prevent abuse
 
 # --- Logging Setup ---
