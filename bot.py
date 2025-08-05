@@ -13,7 +13,7 @@ from PIL import Image
 import requests
 import random
 import pathlib
-from ytmusicapi import YTMusic 
+from ytmusicapi import YTMusic
 
 # Telegram bot token
 BOT_TOKEN = "ENTER_YOUR_BOT_TOKEN_HERE"
@@ -60,10 +60,10 @@ async def upload_to_gofile(file_path: str):
                 with open(file_path, "rb") as f:
                     files = {"file": (os.path.basename(file_path), f)}
                     logger.info(f"Attempt {attempt + 1}: Uploading to {upload_url}...")
-                    
+
                     upload_response = await client.post(upload_url, files=files, timeout=300) # 5 minute timeout for upload
                     upload_response.raise_for_status()
-                    
+
                     data = upload_response.json()
                     if data["status"] == "ok":
                         logger.info("✅ Gofile upload successful!")
@@ -90,12 +90,11 @@ async def upload_to_gofile(file_path: str):
 async def download_content(url, context, msg):
     """Downloads video content using yt-dlp."""
     import yt_dlp
-    parsed_url = urlparse(url)
-    cleaned_url = urlunparse(parsed_url._replace(query=''))
+
     tmpdir = tempfile.mkdtemp()
     video_path, thumbnail_path = None, None
     uploader_username, post_title = "Unknown", "No Title"
-    
+
     progress_data = {"last_update": 0}
 
     def progress_hook(d):
@@ -113,7 +112,9 @@ async def download_content(url, context, msg):
     ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
         'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
-        'noplaylist': True, 'quiet': True, 'no_warnings': True,
+        'noplaylist': True,  # This is the correct way to ignore playlists
+        'quiet': True,
+        'no_warnings': True,
         'merge_output_format': 'mp4',
         'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
         'progress_hooks': [progress_hook],
@@ -121,9 +122,10 @@ async def download_content(url, context, msg):
 
     try:
         await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="📥 Starting download...")
-        
-        info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(cleaned_url, download=True))
-        
+
+        # Pass the original 'url' directly to yt-dlp
+        info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+
         uploader_username = info_dict.get('uploader', info_dict.get('uploader_id', 'Unknown'))
         post_title = info_dict.get('title', 'No Title').strip()
         thumbnail_url = info_dict.get('thumbnail')
@@ -135,7 +137,7 @@ async def download_content(url, context, msg):
                 original_thumbnail_path = os.path.join(tmpdir, "thumb.jpg")
                 with open(original_thumbnail_path, 'wb') as f:
                     f.write(response.content)
-                
+
                 img = Image.open(original_thumbnail_path)
                 width, height = img.size
                 crop_size = min(width, height)
@@ -152,11 +154,12 @@ async def download_content(url, context, msg):
             new_video_path = os.path.join(tmpdir, sanitize_filename(post_title) + pathlib.Path(video_path).suffix)
             os.rename(video_path, new_video_path)
             video_path = new_video_path
-        
+
         return video_path, uploader_username, post_title, tmpdir, thumbnail_path
 
     except Exception as e:
-        logger.error(f"Download failed: {e}", exc_info=True)
+        # More specific logging to help debug future failures
+        logger.error(f"Download failed for URL '{url}'. Error: {e}", exc_info=True)
         return None, uploader_username, post_title, tmpdir, None
 
 async def download_youtube_music(url: str, context: ContextTypes.DEFAULT_TYPE, msg):
@@ -164,7 +167,7 @@ async def download_youtube_music(url: str, context: ContextTypes.DEFAULT_TYPE, m
     tmpdir = tempfile.mkdtemp()
     try:
         await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="🎵 Processing YouTube Music link...")
-        
+
         ytmusic = await asyncio.to_thread(YTMusic)
         video_id = parse_qs(urlparse(url).query).get('v', [None])[0]
         if not video_id:
@@ -176,11 +179,11 @@ async def download_youtube_music(url: str, context: ContextTypes.DEFAULT_TYPE, m
 
         song = await asyncio.to_thread(ytmusic.get_song, videoId=video_id)
         streaming_data = await asyncio.to_thread(ytmusic.get_streaming_data, videoId=video_id)
-        
+
         stream_url = streaming_data['formats'][0]['url']
         title = song['videoDetails']['title']
         artist = song['videoDetails']['author']
-        
+
         file_path = os.path.join(tmpdir, f"{sanitize_filename(title)}.mp3")
 
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -232,14 +235,14 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if file_path:
                 await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="✅ Download complete! Sending audio...")
                 caption_text = f"*Title:* {escape_markdown(title)}\n*By:* {escape_markdown(artist)}"
-                
+
                 with open(file_path, 'rb') as audio_file:
                     await update.message.reply_audio(audio=audio_file, caption=caption_text, parse_mode='MarkdownV2', title=title, performer=artist)
-                
+
                 await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
             else:
                 await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="⚠️ Failed to download the YouTube Music content.")
-        
+
         elif "instagram.com/" in url or "youtube.com/" in url or "youtu.be/" in url:
             msg = await update.message.reply_text("🔗 Processing your link...")
             video_path, uploader, title, temp_dir, thumb_path = await download_content(url, context, msg)
@@ -259,11 +262,10 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         await update.message.reply_video(video=video_file, caption=caption, parse_mode='MarkdownV2', thumbnail=thumb_file_obj)
                         if thumb_file_obj:
                             thumb_file_obj.close()
-                
+
                 await context.bot.delete_message(chat_id=msg.chat_id, message_id=msg.message_id)
             else:
                 await context.bot.edit_message_text(chat_id=msg.chat_id, message_id=msg.message_id, text="⚠️ Failed to download the content.")
-        # No 'else' block is needed, as non-URL messages are filtered out at the start.
 
     except Exception as e:
         logger.error(f"An error occurred in url_handler: {e}", exc_info=True)
@@ -275,7 +277,7 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(error_message)
         else:
             await update.message.reply_text(error_message)
-            
+
     finally:
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -285,14 +287,14 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Starts the bot."""
     print("Starting bot...")
-    
+
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .connect_timeout(30).read_timeout(30).write_timeout(30)
         .build()
     )
-    
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
