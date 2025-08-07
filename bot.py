@@ -4,17 +4,15 @@ import tempfile
 import shutil
 import time
 import re
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import asyncio
 import httpx
-from urllib.parse import urlparse, parse_qs
-from PIL import Image
-import random
-from dotenv import load_dotenv
 import pathlib
-from ytmusicapi import YTMusic
+from dotenv import load_dotenv
+import random
 import yt_dlp
+from PIL import Image
 
 # --- Load .env file ---
 load_dotenv()
@@ -31,24 +29,16 @@ INSTAGRAM_COOKIE_PATH = os.getenv("INSTAGRAM_COOKIE_PATH")
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 # --- Helper Functions ---
 def md2(text: str) -> str:
-    """
-    Escapes a string for use in Telegram's MarkdownV2 parse mode.
-    This prevents characters like '.', '!', '-', etc., from being misinterpreted.
-    """
+    """Escape for MarkdownV2 parse mode."""
     if not text:
         return ""
     escape_chars = r'_*\[\]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
 def sanitize_filename(name: str, max_length: int = 100) -> str:
-    """
-    Removes characters that are invalid for file names and truncates to a safe length.
-    """
-    if not name:
-        return "unknown_media"
+    if not name: return "unknown_media"
     sanitized = re.sub(r'[\\/*?:"<>|]', "_", name)
     return sanitized[:max_length].strip() or "unknown_media"
 
@@ -61,10 +51,7 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes/(1024**3):.1f} GB"
 
 async def upload_to_gofile(file_path: str):
-    """
-    Uploads a file to Gofile.io, handling server selection and retries on failure.
-    This is used for files that are too large for Telegram's limits.
-    """
+    """Upload a file to Gofile.io (with retries)."""
     max_retries, base_delay = 5, 5
     async with httpx.AsyncClient(timeout=60.0) as client:
         for attempt in range(max_retries):
@@ -95,22 +82,90 @@ async def upload_to_gofile(file_path: str):
                     await asyncio.sleep(base_delay * (2 ** attempt))
     raise Exception("❌ All Gofile upload attempts failed.")
 
+# --- YouTube Music Format Selection (Inline Keyboard) ---
+AUDIO_FORMATS = ["mp3", "flac", "wav"]
 
-# --- Download Core Functions ---
+def get_format():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("MP3", callback_data="ytmusicfmt|mp3"),
+         InlineKeyboardButton("FLAC", callback_data="ytmusicfmt|flac"),
+         InlineKeyboardButton("WAV", callback_data="ytmusicfmt|wav")]
+    ])
+
+# --- Save pending YTM link for user on each message (stateless each time) ---
+# Use context.user_data["pending_ytmusic_url"]
+
+async def handle_youtube_music_audio_download(update, context, url, fmt):
+    msg = await update.effective_message.reply_text("🎧 Downloading and Converting...")
+    temp_dir = tempfile.mkdtemp()
+    try:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": fmt,
+                "preferredquality": "192",
+            }]
+        }
+        info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+        base = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info).rsplit(".", 1)[0]
+        file_path = base + f".{fmt}"
+        if not os.path.exists(file_path):
+            await msg.edit_text("❌ Audio conversion failed.")
+            return
+        file_size = os.path.getsize(file_path)
+        caption = (
+            f"*Title:* {md2(info.get('title'))}\n"
+            f"*By:* {md2(info.get('artist') or info.get('uploader','Unknown'))}\n"
+            f"*Size:* {md2(format_file_size(file_size))}\n"
+            f"[🔗 Source]({md2(url)})"
+        )
+        if file_size <= MAX_FILE_SIZE_MB * 1024 * 1024:
+            with open(file_path, "rb") as audio_file:
+                await update.effective_message.reply_audio(
+                    audio=audio_file,
+                    caption=caption,
+                    parse_mode="MarkdownV2",
+                    title=info.get("title"),
+                    performer=info.get("artist") or info.get("uploader")
+                )
+        else:
+            upload_url = await upload_to_gofile(file_path)
+            caption += f"\n[➡️ Download from Gofile]({md2(upload_url)})"
+            await update.effective_message.reply_text(caption, parse_mode="MarkdownV2", disable_web_page_preview=True)
+        await msg.delete()
+    except Exception as e:
+        logger.error(f"YT Music download/conversion error: {e}", exc_info=True)
+        await msg.edit_text("❌ Failed to download from YouTube Music.")
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception: pass
+
+async def ytmusic_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's button pick for YT Music format."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("|", 1)
+    if len(parts) < 2 or parts[0] != "ytmusicfmt":
+        await query.edit_message_text("❌ Something went wrong.")
+        return
+    fmt = parts[1]
+    url = context.user_data.get("pending_ytmusic_url")
+    if not url:
+        await query.edit_message_text("❌ Could not find the original link.")
+        return
+    await query.edit_message_text(f"✅ Format: {fmt.upper()}\nDownload starting...", reply_markup=None)
+    await handle_youtube_music_audio_download(update, context, url, fmt)
 
 async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, status_msg=None, cookie_path: str = None):
-    """
-    Downloads a single video from a given URL using yt-dlp.
-    Handles everything from creating a temp directory to thumbnail processing.
-    """
-    # Create a temporary directory to store the downloaded files.
+    """Downloads a single video from a given URL using yt-dlp."""
     tmpdir = tempfile.mkdtemp()
-
     progress_data = {"last_update": 0}
-
-    # This hook is called by yt-dlp during the download process.
-    # It logs the progress to the console but no longer sends messages to the user
-    # to maintain stability and simplicity.
     def progress_hook(d):
         if d['status'] == 'downloading':
             current_time = time.monotonic()
@@ -136,7 +191,6 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
     # If a cookie path is provided (for Instagram), add it to the options.
     if cookie_path and os.path.exists(cookie_path):
         ydl_opts['cookiefile'] = cookie_path
-
     try:
         if status_msg:
             # Inform the user that the download is starting.
@@ -190,56 +244,13 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
                 os.rename(video_path, new_video_path)
                 video_path = new_video_path
             except OSError:
-                pass # Keep original path if rename fails.
-
+                pass
         return video_path, uploader, title, tmpdir, thumbnail_path
-
     except Exception as e:
         logger.error(f"Download failed for URL '{url}'. Error: {e}", exc_info=True)
         # Clean up the temporary directory on failure.
         shutil.rmtree(tmpdir, ignore_errors=True)
         return None, None, None, None, None
-
-async def download_youtube_music(url: str, context: ContextTypes.DEFAULT_TYPE, status_msg):
-    """Downloads an audio track from a YouTube Music URL."""
-    tmpdir = tempfile.mkdtemp()
-    try:
-        await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="🎵 Processing YouTube Music link...")
-        ytmusic = YTMusic()
-
-        # Extract the video ID from the URL.
-        parsed_url = urlparse(url)
-        video_id = parse_qs(parsed_url.query).get('v', [None])[0]
-        if not video_id and 'music.youtube.com/watch' in url:
-            path_parts = parsed_url.path.split('/')
-            if len(path_parts) > 2:
-                video_id = path_parts[-1]
-        if not video_id:
-            raise ValueError("Could not extract video ID from URL")
-
-        # Get song metadata and streaming URL.
-        song = await asyncio.to_thread(ytmusic.get_song, videoId=video_id)
-        streaming_data = await asyncio.to_thread(ytmusic.get_streaming_data, videoId=video_id)
-        if not streaming_data.get('formats'):
-            raise Exception("No streaming formats available")
-        stream_url = streaming_data['formats'][0]['url']
-        title, artist = song['videoDetails']['title'], song['videoDetails']['author']
-
-        # Download the audio stream directly.
-        file_path = os.path.join(tmpdir, f"{sanitize_filename(title)}.mp3")
-        await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="📥 Downloading audio...")
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("GET", stream_url) as response:
-                response.raise_for_status()
-                with open(file_path, 'wb') as f:
-                    async for chunk in response.aiter_bytes():
-                        f.write(chunk)
-
-        return file_path, title, artist, tmpdir
-    except Exception as e:
-        logger.error(f"YouTube Music download failed: {e}", exc_info=True)
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        return None, None, None, None
 
 async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.DEFAULT_TYPE, msg):
     """Processes and downloads all videos from a given playlist URL."""
@@ -255,19 +266,15 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
             text=f"⚠️ Playlist too large! Max {MAX_PLAYLIST_SIZE} videos allowed. Found {original_total_videos} videos."
         )
         return
-
-    # Process only up to the maximum limit.
     videos = videos[:MAX_PLAYLIST_SIZE]
     total_videos = len(videos)
-
     await context.bot.edit_message_text(
         chat_id=msg.chat_id,
         message_id=msg.message_id,
         text=f"✅ Playlist detected: {playlist_title}\nFound {original_total_videos} videos.\nStarting download..."
     )
-
-    successful_downloads, failed_downloads = 0, 0
-    # Loop through each video in the playlist.
+    successful_downloads = 0
+    failed_downloads = 0
     for i, video_entry in enumerate(videos, 1):
         video_url = video_entry.get('url') or video_entry.get('webpage_url')
         video_title = video_entry.get('title', 'Unknown Title')
@@ -281,7 +288,6 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
             chat_id=msg.chat_id,
             text=f"📥 Downloading video {i}/{total_videos}: {video_title[:50]}{'...' if len(video_title) > 50 else ''}"
         )
-
         try:
             video_path, uploader, title, temp_dir, thumb_path = await download_single_video(video_url, context, status_msg)
 
@@ -290,13 +296,11 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
                 video_path, uploader, title, temp_dir, thumb_path,
                 video_url, context, status_msg, chat_id=msg.chat_id, prefix=f"{i}/{total_videos} "
             )
-
             if success:
                 successful_downloads += 1
             else:
                 failed_downloads += 1
-
-            await asyncio.sleep(2) # Small delay to avoid rate-limiting.
+            await asyncio.sleep(2)  # To avoid Telegram flood limits
         except Exception as e:
             failed_downloads += 1
             logger.error(f"Failed processing video {i} from playlist. URL: {video_url}, Error: {e}", exc_info=True)
@@ -312,33 +316,22 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
         summary_text += f"\n⚠️ Failed: {failed_downloads}"
     await context.bot.send_message(chat_id=msg.chat_id, text=summary_text)
 
-async def _handle_video_result(
-    video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, chat_id, prefix=""
-):
-    """
-    Handles the result of a download: sends the video, or a Gofile link if it's too large.
-    Also manages cleanup of temporary files and status messages.
-    Returns True on success, False on failure.
-    """
+async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, chat_id, prefix=""):
     try:
         if video_path and os.path.exists(video_path):
             file_size_bytes = os.path.getsize(video_path)
-            file_size_mb = file_size_bytes / (1024 * 1024)
-
-            # Construct the caption with MarkdownV2 formatting.
             caption = (
                 f"*{prefix}Title:* {md2(title)}\n"
                 f"*By:* {md2(uploader)}\n"
                 f"*Size:* {md2(format_file_size(file_size_bytes))}\n"
                 f"[🔗 Source]({md2(url)})"
             )
-
-            # If file is too large for Telegram, upload to Gofile.
+            file_size_mb = file_size_bytes / (1024 * 1024)
             if file_size_mb > MAX_FILE_SIZE_MB:
                 await context.bot.edit_message_text(
                     chat_id=status_msg.chat_id,
                     message_id=status_msg.message_id,
-                    text=fr"📤 Large file ({file_size_mb:.1f}MB) - uploading to Gofile."
+                    text=f"📤 Large file ({file_size_mb:.1f}MB) - uploading to Gofile."
                 )
                 gofile_link = await upload_to_gofile(video_path)
                 caption += f"\n[➡️ Download from Gofile]({md2(gofile_link)})"
@@ -349,7 +342,6 @@ async def _handle_video_result(
                     disable_web_page_preview=True
                 )
             else:
-                # Otherwise, send the video directly.
                 await context.bot.edit_message_text(
                     chat_id=status_msg.chat_id,
                     message_id=status_msg.message_id,
@@ -383,7 +375,7 @@ async def _handle_video_result(
             await context.bot.edit_message_text(
                 chat_id=status_msg.chat_id,
                 message_id=status_msg.message_id,
-                text=r"⚠️ Failed to download the content. The link may be private, invalid, or temporarily unavailable."
+                text="⚠️ Failed to download the content. The link may be private, invalid, or temporarily unavailable."
             )
             return False
     except Exception as e:
@@ -391,7 +383,7 @@ async def _handle_video_result(
         await context.bot.edit_message_text(
             chat_id=status_msg.chat_id,
             message_id=status_msg.message_id,
-            text=r"❌ An error occurred while processing the video."
+            text="❌ An error occurred while processing the video."
         )
         return False
     finally:
@@ -399,9 +391,7 @@ async def _handle_video_result(
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-
 # --- Telegram Bot Handlers ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command with a welcome message."""
     welcome_text = (
@@ -418,7 +408,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode='MarkdownV2')
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /help command with usage info and settings."""
     help_text = (
         "📱 *Supported platforms:*\n"
         "• YouTube videos \\& playlists\n"
@@ -432,50 +421,34 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='MarkdownV2')
 
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """The main handler for all incoming text messages containing URLs."""
+    """Main handler for text/URL input."""
     if not update.message or not update.message.text:
         return
-
     url = update.message.text.strip()
+    # Always set pending link for the button handler on YT Music
+    if "music.youtube.com/" in url:
+        context.user_data["pending_ytmusic_url"] = url
+        await update.message.reply_text(
+            "🎵 Choose audio format:",
+            reply_markup=get_format()
+        )
+        return
 
-    # Ignore messages that do not contain a supported URL.
     if not re.search(r"(instagram\.com|youtube\.com|youtu\.be|music\.youtube\.com)", url):
         logger.info(f"Ignoring non-URL message from user {update.message.from_user.id}")
         return
-
-    # Send an initial "Processing..." message to the user.
     status_msg = await update.message.reply_text("🔗 Processing your link...")
     temp_dir = None
-
     try:
-        # --- URL Routing Logic ---
-        if "music.youtube.com/" in url:
-            file_path, title, artist, temp_dir = await download_youtube_music(url, context, status_msg)
-            if file_path and os.path.exists(file_path):
-                # If download is successful, send the audio file.
-                await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="✅ Download complete\\! Sending audio...")
-                caption = f"*Title:* {md2(title)}\n*By:* {md2(artist)}"
-                with open(file_path, 'rb') as audio_file:
-                    await update.message.reply_audio(
-                        audio=audio_file, caption=caption, parse_mode='MarkdownV2',
-                        title=title, performer=artist
-                    )
-                await context.bot.delete_message(chat_id=status_msg.chat_id, message_id=status_msg.message_id)
-            else:
-                await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="⚠️ Failed to download from YouTube Music.")
-
-        elif "youtube.com/" in url or "youtu.be/" in url:
-            # For YouTube, first check if it's a playlist or a single video.
+        if "youtube.com/" in url or "youtu.be/" in url:
             ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
             info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
-
             if info_dict.get('_type') == 'playlist':
                 await process_playlist(url, info_dict, context, status_msg)
-                return # The playlist function handles its own messages and cleanup.
+                return
             else:
                 video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
                 await _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, update.message.chat_id)
-
         elif "instagram.com" in url:
             video_path, uploader, title, temp_dir, thumb_path = await download_single_video(
                 url, context, status_msg, cookie_path=INSTAGRAM_COOKIE_PATH
@@ -484,28 +457,21 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 video_path, uploader, title, temp_dir, thumb_path,
                 url, context, status_msg, update.message.chat_id
             )
-
-        else:
-            # A generic fallback for other potential video links.
-            video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
-            await _handle_video_result(
-                video_path, uploader, title, temp_dir, thumb_path,
-                url, context, status_msg, update.message.chat_id
-            )
-
     except Exception as e:
         logger.error(f"Error in url_handler: {e}", exc_info=True)
-        await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text=r"❌ An unexpected error occurred\. Please try again later\.")
+        await context.bot.edit_message_text(
+            chat_id=status_msg.chat_id,
+            message_id=status_msg.message_id,
+            text="❌ An unexpected error occurred. Please try again later."
+        )
     finally:
         # This cleanup block runs regardless of success or failure, ensuring no temp files are left behind.
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-
+# --- Run Bot ---
 def main():
-    """The main function to start the bot."""
     print("🤖 Starting Telegram Media Downloader Bot...")
-
     if not BOT_TOKEN:
         print("❌ ERROR: Please set your bot token in the BOT_TOKEN environment variable!")
         return
@@ -524,8 +490,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
-
-    # Start polling for updates from Telegram.
+    app.add_handler(CallbackQueryHandler(ytmusic_format_callback, pattern=r"^ytmusicfmt\|"))
     print("✅ Bot started successfully! Send /start to begin.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
