@@ -3,5 +3,4 @@ httpx
 Pillow
 requests
 yt-dlp
-ytmusicapi
 python-dotenv
