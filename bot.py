@@ -14,8 +14,10 @@ import random
 import yt_dlp
 from PIL import Image
 
+
 # --- Load .env file ---
 load_dotenv()
+
 
 # --- Configuration ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -25,9 +27,11 @@ PROGRESS_UPDATE_INTERVAL = float(os.getenv("PROGRESS_UPDATE_INTERVAL", "3.0"))
 # Optional: Path to a Netscape-formatted cookie file for Instagram.
 INSTAGRAM_COOKIE_PATH = os.getenv("INSTAGRAM_COOKIE_PATH")
 
+
 # --- Logging Setup ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 # --- Helper Functions ---
 def md2(text: str) -> str:
@@ -37,10 +41,12 @@ def md2(text: str) -> str:
     escape_chars = r'_*\[\]()~`>#+-=|{}.!'
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', str(text))
 
+
 def sanitize_filename(name: str, max_length: int = 100) -> str:
     if not name: return "unknown_media"
     sanitized = re.sub(r'[\\/*?:"<>|]', "_", name)
     return sanitized[:max_length].strip() or "unknown_media"
+
 
 def format_file_size(size_bytes: int) -> str:
     """Converts a file size in bytes to a human-readable string (KB, MB, GB)."""
@@ -49,6 +55,7 @@ def format_file_size(size_bytes: int) -> str:
     if size_bytes < 1024**3:
         return f"{size_bytes/(1024**2):.1f} MB"
     return f"{size_bytes/(1024**3):.1f} GB"
+
 
 async def upload_to_gofile(file_path: str):
     """Upload a file to Gofile.io (with retries)."""
@@ -64,6 +71,7 @@ async def upload_to_gofile(file_path: str):
                 except Exception as e:
                     logger.warning(f"Could not get Gofile server, using fallback. Error: {e}")
                     server = f"store{random.randint(1, 9)}"
+
 
                 # Perform the file upload.
                 upload_url = f"https://{server}.gofile.io/uploadFile"
@@ -82,20 +90,44 @@ async def upload_to_gofile(file_path: str):
                     await asyncio.sleep(base_delay * (2 ** attempt))
     raise Exception("❌ All Gofile upload attempts failed.")
 
+
 # --- YouTube Music Format Selection (Inline Keyboard) ---
 AUDIO_FORMATS = ["mp3", "flac", "wav"]
 
-def get_format():
+
+def get_ytmusic_format_keyboard():
+    """Returns inline keyboard for YouTube Music format selection."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("MP3", callback_data="ytmusicfmt|mp3"),
          InlineKeyboardButton("FLAC", callback_data="ytmusicfmt|flac"),
          InlineKeyboardButton("WAV", callback_data="ytmusicfmt|wav")]
     ])
 
-# --- Save pending YTM link for user on each message (stateless each time) ---
-# Use context.user_data["pending_ytmusic_url"]
+
+# --- YouTube Video/Playlist Format Selection (Inline Keyboard) ---
+def get_youtube_format_keyboard():
+    """Returns inline keyboard for YouTube video/playlist format selection."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📹 Download Video", callback_data="ytfmt|video")],
+        [InlineKeyboardButton("🎵 Download Audio", callback_data="ytfmt|audio")]
+    ])
+
+
+def get_youtube_audio_format_keyboard():
+    """Returns inline keyboard for YouTube audio format selection."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("MP3", callback_data="ytaudiofmt|mp3"),
+         InlineKeyboardButton("FLAC", callback_data="ytaudiofmt|flac"),
+         InlineKeyboardButton("WAV", callback_data="ytaudiofmt|wav")]
+    ])
+
+
+# --- Save pending YouTube link for user on each message (stateless each time) ---
+# Use context.user_data["pending_ytmusic_url"] and context.user_data["pending_youtube_url"]
+
 
 async def handle_youtube_music_audio_download(update, context, url, fmt):
+    """Handles YouTube Music audio download with specified format."""
     msg = await update.effective_message.reply_text("🎧 Downloading and Converting...")
     temp_dir = tempfile.mkdtemp()
     try:
@@ -146,6 +178,65 @@ async def handle_youtube_music_audio_download(update, context, url, fmt):
             shutil.rmtree(temp_dir)
         except Exception: pass
 
+
+async def handle_youtube_audio_download(update, context, url, fmt, is_playlist=False):
+    """Handles YouTube audio download with specified format."""
+    if is_playlist:
+        # For playlists, we need to handle each video separately
+        await process_audio_playlist(url, context, update.effective_message, fmt)
+    else:
+        # For single videos
+        msg = await update.effective_message.reply_text("🎧 Downloading and Converting...")
+        temp_dir = tempfile.mkdtemp()
+        try:
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": fmt,
+                    "preferredquality": "192",
+                }]
+            }
+            info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+            base = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info).rsplit(".", 1)[0]
+            file_path = base + f".{fmt}"
+            if not os.path.exists(file_path):
+                await msg.edit_text("❌ Audio conversion failed.")
+                return
+            file_size = os.path.getsize(file_path)
+            caption = (
+                f"*Title:* {md2(info.get('title'))}\n"
+                f"*By:* {md2(info.get('uploader','Unknown'))}\n"
+                f"*Size:* {md2(format_file_size(file_size))}\n"
+                f"[🔗 Source]({md2(url)})"
+            )
+            if file_size <= MAX_FILE_SIZE_MB * 1024 * 1024:
+                with open(file_path, "rb") as audio_file:
+                    await update.effective_message.reply_audio(
+                        audio=audio_file,
+                        caption=caption,
+                        parse_mode="MarkdownV2",
+                        title=info.get("title"),
+                        performer=info.get("uploader")
+                    )
+            else:
+                upload_url = await upload_to_gofile(file_path)
+                caption += f"\n[➡️ Download from Gofile]({md2(upload_url)})"
+                await update.effective_message.reply_text(caption, parse_mode="MarkdownV2", disable_web_page_preview=True)
+            await msg.delete()
+        except Exception as e:
+            logger.error(f"YouTube audio download/conversion error: {e}", exc_info=True)
+            await msg.edit_text("❌ Failed to download audio from YouTube.")
+        finally:
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception: pass
+
+
 async def ytmusic_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the user's button pick for YT Music format."""
     query = update.callback_query
@@ -162,6 +253,195 @@ async def ytmusic_format_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(f"✅ Format: {fmt.upper()}\nDownload starting...", reply_markup=None)
     await handle_youtube_music_audio_download(update, context, url, fmt)
 
+
+async def youtube_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's button pick for YouTube video/audio format."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("|", 1)
+    if len(parts) < 2 or parts[0] != "ytfmt":
+        await query.edit_message_text("❌ Something went wrong.")
+        return
+
+    format_type = parts[1]
+    url = context.user_data.get("pending_youtube_url")
+    is_playlist = context.user_data.get("pending_youtube_is_playlist", False)
+
+    if not url:
+        await query.edit_message_text("❌ Could not find the original link.")
+        return
+
+    if format_type == "video":
+        await query.edit_message_text("✅ Video format selected\nDownload starting...", reply_markup=None)
+        # Handle video download (existing functionality)
+        if is_playlist:
+            # Extract playlist info again for video download
+            ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
+            info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
+            await process_playlist(url, info_dict, context, query.message)
+        else:
+            status_msg = query.message
+            video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
+            await _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, query.message.chat_id)
+
+    elif format_type == "audio":
+        # Store the URL and playlist info for audio format selection
+        context.user_data["pending_youtube_audio_url"] = url
+        context.user_data["pending_youtube_audio_is_playlist"] = is_playlist
+        await query.edit_message_text("🎵 Choose audio format:", reply_markup=get_youtube_audio_format_keyboard())
+
+
+async def youtube_audio_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the user's button pick for YouTube audio format."""
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("|", 1)
+    if len(parts) < 2 or parts[0] != "ytaudiofmt":
+        await query.edit_message_text("❌ Something went wrong.")
+        return
+
+    fmt = parts[1]
+    url = context.user_data.get("pending_youtube_audio_url")
+    is_playlist = context.user_data.get("pending_youtube_audio_is_playlist", False)
+
+    if not url:
+        await query.edit_message_text("❌ Could not find the original link.")
+        return
+
+    await query.edit_message_text(f"✅ Audio Format: {fmt.upper()}\nDownload starting...", reply_markup=None)
+    await handle_youtube_audio_download(update, context, url, fmt, is_playlist)
+
+
+async def process_audio_playlist(url: str, context: ContextTypes.DEFAULT_TYPE, msg, fmt: str):
+    """Processes and downloads all audio from a given playlist URL."""
+    # Extract playlist info
+    ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
+    playlist_info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
+
+    playlist_title = playlist_info.get('title', 'Unnamed Playlist')
+    videos = playlist_info.get('entries', [])
+    original_total_videos = len(videos)
+
+    # Enforce the maximum playlist size limit.
+    if original_total_videos > MAX_PLAYLIST_SIZE:
+        await context.bot.edit_message_text(
+            chat_id=msg.chat_id,
+            message_id=msg.message_id,
+            text=f"⚠️ Playlist too large! Max {MAX_PLAYLIST_SIZE} videos allowed. Found {original_total_videos} videos."
+        )
+        return
+
+    videos = videos[:MAX_PLAYLIST_SIZE]
+    total_videos = len(videos)
+    await context.bot.edit_message_text(
+        chat_id=msg.chat_id,
+        message_id=msg.message_id,
+        text=f"✅ Audio Playlist detected: {playlist_title}\nFound {original_total_videos} videos.\nStarting audio download..."
+    )
+
+    successful_downloads = 0
+    failed_downloads = 0
+
+    for i, video_entry in enumerate(videos, 1):
+        video_url = video_entry.get('url') or video_entry.get('webpage_url')
+        video_title = video_entry.get('title', 'Unknown Title')
+        if not video_url:
+            logger.warning(f"No URL found for video {i}: {video_title}")
+            failed_downloads += 1
+            continue
+
+        # Send a status message for the current audio being downloaded.
+        status_msg = await context.bot.send_message(
+            chat_id=msg.chat_id,
+            text=f"🎧 Downloading audio {i}/{total_videos}: {video_title[:50]}{'...' if len(video_title) > 50 else ''}"
+        )
+
+        try:
+            temp_dir = tempfile.mkdtemp()
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": fmt,
+                    "preferredquality": "192",
+                }]
+            }
+
+            info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(video_url, download=True))
+            base = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info).rsplit(".", 1)[0]
+            file_path = base + f".{fmt}"
+
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                caption = (
+                    f"*{i}/{total_videos} Title:* {md2(info.get('title'))}\n"
+                    f"*By:* {md2(info.get('uploader','Unknown'))}\n"
+                    f"*Size:* {md2(format_file_size(file_size))}\n"
+                    f"[🔗 Source]({md2(video_url)})"
+                )
+
+                if file_size <= MAX_FILE_SIZE_MB * 1024 * 1024:
+                    with open(file_path, "rb") as audio_file:
+                        await context.bot.send_audio(
+                            chat_id=msg.chat_id,
+                            audio=audio_file,
+                            caption=caption,
+                            parse_mode="MarkdownV2",
+                            title=info.get("title"),
+                            performer=info.get("uploader")
+                        )
+                else:
+                    upload_url = await upload_to_gofile(file_path)
+                    caption += f"\n[➡️ Download from Gofile]({md2(upload_url)})"
+                    await context.bot.send_message(
+                        chat_id=msg.chat_id,
+                        text=caption,
+                        parse_mode="MarkdownV2",
+                        disable_web_page_preview=True
+                    )
+                successful_downloads += 1
+            else:
+                failed_downloads += 1
+                await context.bot.edit_message_text(
+                    chat_id=status_msg.chat_id,
+                    message_id=status_msg.message_id,
+                    text=f"❌ Error on audio {i}/{total_videos}"
+                )
+                continue
+
+            # Clean up temp directory
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+            # Delete the status message
+            await context.bot.delete_message(
+                chat_id=status_msg.chat_id,
+                message_id=status_msg.message_id
+            )
+
+            await asyncio.sleep(2)  # To avoid Telegram flood limits
+
+        except Exception as e:
+            failed_downloads += 1
+            logger.error(f"Failed processing audio {i} from playlist. URL: {video_url}, Error: {e}", exc_info=True)
+            await context.bot.edit_message_text(
+                chat_id=status_msg.chat_id,
+                message_id=status_msg.message_id,
+                text=f"❌ Error on audio {i}/{total_videos}"
+            )
+            if 'temp_dir' in locals():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Send a final summary message to the user.
+    summary_text = f"✅ Audio Playlist {playlist_title} complete!\n📊 Downloaded: {successful_downloads}/{total_videos}"
+    if failed_downloads > 0:
+        summary_text += f"\n⚠️ Failed: {failed_downloads}"
+    await context.bot.send_message(chat_id=msg.chat_id, text=summary_text)
+
+
 async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, status_msg=None, cookie_path: str = None):
     """Downloads a single video from a given URL using yt-dlp."""
     tmpdir = tempfile.mkdtemp()
@@ -176,6 +456,7 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
                 logger.info(f"Downloading: {percent} at {speed} (ETA: {eta})")
                 progress_data["last_update"] = current_time
 
+
     # yt-dlp options for downloading the best quality video and audio.
     ydl_opts = {
         'format': 'bestvideo+bestaudio/best',
@@ -188,6 +469,7 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
         'progress_hooks': [progress_hook],
     }
 
+
     # If a cookie path is provided (for Instagram), add it to the options.
     if cookie_path and os.path.exists(cookie_path):
         ydl_opts['cookiefile'] = cookie_path
@@ -196,8 +478,10 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
             # Inform the user that the download is starting.
             await context.bot.edit_message_text(chat_id=status_msg.chat_id, message_id=status_msg.message_id, text="📥 Starting download...")
 
+
         # Run the blocking yt-dlp download in a separate thread.
         info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+
 
         # Locate the downloaded file path.
         video_path = info_dict.get('filepath')
@@ -208,10 +492,12 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
             else:
                 raise Exception("No video file found after download")
 
+
         # Extract metadata.
         uploader = info_dict.get('uploader', info_dict.get('uploader_id', 'Unknown'))
         title = info_dict.get('title', 'No Title')
         thumbnail_url = info_dict.get('thumbnail')
+
 
         # Process the thumbnail: download, crop to a square, and resize.
         thumbnail_path = None
@@ -236,6 +522,7 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
             except Exception as e:
                 logger.warning(f"Thumbnail processing failed: {e}")
 
+
         # Rename the video file to a sanitized version of its title.
         if video_path:
             file_ext = pathlib.Path(video_path).suffix
@@ -252,11 +539,13 @@ async def download_single_video(url: str, context: ContextTypes.DEFAULT_TYPE, st
         shutil.rmtree(tmpdir, ignore_errors=True)
         return None, None, None, None, None
 
+
 async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.DEFAULT_TYPE, msg):
     """Processes and downloads all videos from a given playlist URL."""
     playlist_title = playlist_info.get('title', 'Unnamed Playlist')
     videos = playlist_info.get('entries', [])
     original_total_videos = len(videos)
+
 
     # Enforce the maximum playlist size limit.
     if original_total_videos > MAX_PLAYLIST_SIZE:
@@ -271,7 +560,7 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
     await context.bot.edit_message_text(
         chat_id=msg.chat_id,
         message_id=msg.message_id,
-        text=f"✅ Playlist detected: {playlist_title}\nFound {original_total_videos} videos.\nStarting download..."
+        text=f"✅ Video Playlist detected: {playlist_title}\nFound {original_total_videos} videos.\nStarting download..."
     )
     successful_downloads = 0
     failed_downloads = 0
@@ -283,6 +572,7 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
             failed_downloads += 1
             continue
 
+
         # Send a status message for the current video being downloaded.
         status_msg = await context.bot.send_message(
             chat_id=msg.chat_id,
@@ -290,6 +580,7 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
         )
         try:
             video_path, uploader, title, temp_dir, thumb_path = await download_single_video(video_url, context, status_msg)
+
 
             # The result handler sends the video/Gofile link and cleans up.
             success = await _handle_video_result(
@@ -310,11 +601,13 @@ async def process_playlist(url: str, playlist_info: dict, context: ContextTypes.
                 text=f"❌ Error on video {i}/{total_videos}"
             )
 
+
     # Send a final summary message to the user.
-    summary_text = f"✅ Playlist {playlist_title} complete!\n📊 Downloaded: {successful_downloads}/{total_videos}"
+    summary_text = f"✅ Video Playlist {playlist_title} complete!\n📊 Downloaded: {successful_downloads}/{total_videos}"
     if failed_downloads > 0:
         summary_text += f"\n⚠️ Failed: {failed_downloads}"
     await context.bot.send_message(chat_id=msg.chat_id, text=summary_text)
+
 
 async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, chat_id, prefix=""):
     try:
@@ -364,6 +657,7 @@ async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path
                         if thumb_obj:
                             thumb_obj.close()
 
+
             # Delete the "Downloading..." status message.
             await context.bot.delete_message(
                 chat_id=status_msg.chat_id,
@@ -391,6 +685,7 @@ async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+
 # --- Telegram Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command with a welcome message."""
@@ -402,10 +697,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Instagram\n\n"
         "*How to Use:*\n"
         "Just send me a link and I\\'ll download it for you\\!\n\n"
+        "*Features:*\n"
+        "• Choose between video or audio for YouTube links\n"
+        "• Multiple audio formats \\(MP3, FLAC, WAV\\)\n"
+        "• Automatic playlist detection\n\n"
         "*Playlist Limit:*\n"
         f"The bot will process a maximum of *{MAX_PLAYLIST_SIZE}* videos from a single playlist\\."
     )
     await update.message.reply_text(welcome_text, parse_mode='MarkdownV2')
+
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
@@ -413,6 +713,10 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• YouTube videos \\& playlists\n"
         "• YouTube Music\n"
         "• Instagram\n\n"
+        "🎵 *YouTube Features:*\n"
+        "• Choose Video or Audio download\n"
+        "• Audio formats: MP3, FLAC, WAV\n"
+        "• Playlist support for both formats\n\n"
         f"⚙️ *Settings:*\n"
         f"• Max playlist videos: *{MAX_PLAYLIST_SIZE}*\n"
         f"• Max file size: *{MAX_FILE_SIZE_MB}MB*\n\n"
@@ -420,35 +724,60 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(help_text, parse_mode='MarkdownV2')
 
+
 async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Main handler for text/URL input."""
     if not update.message or not update.message.text:
         return
     url = update.message.text.strip()
-    # Always set pending link for the button handler on YT Music
+
+    # Handle YouTube Music links (direct audio format selection)
     if "music.youtube.com/" in url:
         context.user_data["pending_ytmusic_url"] = url
         await update.message.reply_text(
             "🎵 Choose audio format:",
-            reply_markup=get_format()
+            reply_markup=get_ytmusic_format_keyboard()
         )
         return
 
-    if not re.search(r"(instagram\.com|youtube\.com|youtu\.be|music\.youtube\.com)", url):
+    if not re.search(r"(instagram\.com|youtube\.com|youtu\.be)", url):
         logger.info(f"Ignoring non-URL message from user {update.message.from_user.id}")
         return
+
     status_msg = await update.message.reply_text("🔗 Processing your link...")
     temp_dir = None
     try:
+        # Handle YouTube links (video/audio choice)
         if "youtube.com/" in url or "youtu.be/" in url:
             ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
             info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
-            if info_dict.get('_type') == 'playlist':
-                await process_playlist(url, info_dict, context, status_msg)
-                return
+
+            is_playlist = info_dict.get('_type') == 'playlist'
+            context.user_data["pending_youtube_url"] = url
+            context.user_data["pending_youtube_is_playlist"] = is_playlist
+
+            if is_playlist:
+                playlist_title = info_dict.get('title', 'Unnamed Playlist')
+                video_count = len(info_dict.get('entries', []))
+                await context.bot.edit_message_text(
+                    chat_id=status_msg.chat_id,
+                    message_id=status_msg.message_id,
+                    text=f"🎬 *Playlist Detected:* {md2(playlist_title)}\n📊 *Videos:* {video_count}\n\n*Choose download format:*",
+                    parse_mode='MarkdownV2',
+                    reply_markup=get_youtube_format_keyboard()
+                )
             else:
-                video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
-                await _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, update.message.chat_id)
+                video_title = info_dict.get('title', 'Unknown Title')
+                await context.bot.edit_message_text(
+                    chat_id=status_msg.chat_id,
+                    message_id=status_msg.message_id,
+                    text=f"🎬 *Video:* {md2(video_title)}\n\n*Choose download format:*",
+                    parse_mode='MarkdownV2',
+                    reply_markup=get_youtube_format_keyboard()
+                )
+            return
+
+        # Handle Instagram links (direct video download)
         elif "instagram.com" in url:
             video_path, uploader, title, temp_dir, thumb_path = await download_single_video(
                 url, context, status_msg, cookie_path=INSTAGRAM_COOKIE_PATH
@@ -469,12 +798,14 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+
 # --- Run Bot ---
 def main():
     print("🤖 Starting Telegram Media Downloader Bot...")
     if not BOT_TOKEN:
         print("❌ ERROR: Please set your bot token in the BOT_TOKEN environment variable!")
         return
+
 
     # Build the bot application.
     app = (
@@ -486,13 +817,17 @@ def main():
         .build()
     )
 
+
     # Register the command and message handlers.
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
     app.add_handler(CallbackQueryHandler(ytmusic_format_callback, pattern=r"^ytmusicfmt\|"))
+    app.add_handler(CallbackQueryHandler(youtube_format_callback, pattern=r"^ytfmt\|"))
+    app.add_handler(CallbackQueryHandler(youtube_audio_format_callback, pattern=r"^ytaudiofmt\|"))
     print("✅ Bot started successfully! Send /start to begin.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
