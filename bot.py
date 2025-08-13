@@ -100,23 +100,33 @@ async def handle_youtube_music_audio_download(update, context, url, fmt):
     temp_dir = tempfile.mkdtemp()
     try:
         ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": os.path.join(temp_dir, "%(title)s.%(ext)s"),
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": fmt,
-                "preferredquality": "192",
-            }]
+            'format': 'bestaudio/best',
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'writethumbnail': True,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': fmt,
+                'preferredquality': '192',
+            }, {
+                'key': 'EmbedThumbnail',
+            }, {
+                'key': 'FFmpegMetadata',
+            }],
         }
         info = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
         base = yt_dlp.YoutubeDL(ydl_opts).prepare_filename(info).rsplit(".", 1)[0]
         file_path = base + f".{fmt}"
         if not os.path.exists(file_path):
-            await msg.edit_text("❌ Audio conversion failed.")
-            return
+            # Fallback in case the extension is different
+            found_files = [f for f in os.listdir(temp_dir) if f.endswith(f'.{fmt}')]
+            if not found_files:
+                await msg.edit_text("❌ Audio conversion failed.")
+                return
+            file_path = os.path.join(temp_dir, found_files[0])
+
         file_size = os.path.getsize(file_path)
         caption = (
             f"*Title:* {md2(info.get('title'))}\n"
