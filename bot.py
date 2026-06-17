@@ -22,6 +22,14 @@ from datetime import datetime
 # --- Load .env file ---
 load_dotenv()
 
+# Proxy FTW (fuck you NTA)
+# exam karau jhaat bhar,baate chodu raat bhar.
+# diaper badalne se drrhea nehi rukta BTW.
+PROXY_URL = os.getenv("PROXY_URL")
+if os.getenv("PROXY_URL"):
+    os.environ["HTTPS_PROXY"] = os.getenv("PROXY_URL")
+    os.environ["HTTP_PROXY"] = os.getenv("PROXY_URL")
+
 
 # --- Configuration ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -1118,6 +1126,11 @@ def main():
         print("⚠️ Instagram credentials not configured - only public content supported")
         print("   Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD environment variables for full access")
 
+    if PROXY_URL:
+        print(f"✅ Proxy configured: {PROXY_URL}")
+    else:
+        print("⚠️ No proxy configured - connecting directly")
+
     # Build the bot application.
     app = (
         Application.builder()
@@ -1141,3 +1154,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
