@@ -128,8 +128,7 @@ All settings are in `.env` (see [.env.example](.env.example) for reference):
 
 ```
 ├── bot.py               # Main bot script
-├── .env                 # Your configuration (not committed)
-├── .env.example         # Configuration template
+├── .env.example         # Configuration template (DO NOT MAKE THIS PUBLIC AFTER CONFIGURATION!!!)
 ├── docker-compose.yml   # Local Bot API server (Docker)
 ├── requirements.txt     # Python dependencies
 └── README.md            # This file
