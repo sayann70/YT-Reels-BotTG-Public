@@ -17,28 +17,55 @@ import instaloader
 from urllib.parse import urlparse
 import json
 from datetime import datetime
+import platform
+import psutil
 
 
-# --- Load .env file ---
+# Load .env file
 load_dotenv()
 
 
-# --- Configuration ---
+# Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MAX_PLAYLIST_SIZE = int(os.getenv("MAX_PLAYLIST_SIZE", "50"))
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "49"))
 PROGRESS_UPDATE_INTERVAL = float(os.getenv("PROGRESS_UPDATE_INTERVAL", "3.0"))
 # Instagram credentials (optional, for private content)
 INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
+# Self-hosted Bot API Server configuration
+LOCAL_API_SERVER = os.getenv("LOCAL_API_SERVER", "http://localhost:8081")
+USE_LOCAL_API = os.getenv("USE_LOCAL_API", "false").lower() == "true"
+# File size limit: auto-adjusts based on API mode, can be overridden in .env
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "1999" if USE_LOCAL_API else "49"))
+# Admin configuration (set ADMIN_ID to your Telegram user ID for /ping access)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_START_TIME = time.time()
 
 
-# --- Logging Setup ---
+# Active Task Tracking
+active_tasks = {}
+_task_counter = 0
+
+
+def register_task(description: str) -> int:
+    """Register an active task for /ping monitoring."""
+    global _task_counter
+    _task_counter += 1
+    active_tasks[_task_counter] = {"desc": description, "started": time.time()}
+    return _task_counter
+
+
+def unregister_task(task_id: int):
+    """Remove a completed task from tracking."""
+    active_tasks.pop(task_id, None)
+
+
+# Logging Setup
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# --- Helper Functions ---
+# Helper Functions
 def md2(text: str) -> str:
     """Escape for MarkdownV2 parse mode."""
     if not text:
@@ -112,7 +139,7 @@ async def upload_to_gofile(file_path: str):
     raise Exception("❌ All Gofile upload attempts failed.")
 
 
-# --- Instagram Download Functions ---
+# Instagram Download Functions
 async def download_instagram_content(url: str, context: ContextTypes.DEFAULT_TYPE, status_msg=None):
     """Downloads Instagram content using instaloader."""
     temp_dir = tempfile.mkdtemp()
@@ -346,14 +373,14 @@ async def handle_instagram_content(update: Update, context: ContextTypes.DEFAULT
                             video=video_file,
                             caption=file_caption,
                             parse_mode='MarkdownV2',
-                            write_timeout=60
+                            write_timeout=600
                         )
                 else:
-                    # Send as photo
+                    # Send as document (preserves original quality, no Telegram compression)
                     with open(file_path, 'rb') as photo_file:
-                        await context.bot.send_photo(
+                        await context.bot.send_document(
                             chat_id=update.effective_chat.id,
-                            photo=photo_file,
+                            document=photo_file,
                             caption=file_caption,
                             parse_mode='MarkdownV2'
                         )
@@ -390,7 +417,7 @@ async def handle_instagram_content(update: Update, context: ContextTypes.DEFAULT
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# --- YouTube Music Format Selection (Inline Keyboard) ---
+# YouTube Music Format Selection (Inline Keyboard) 
 AUDIO_FORMATS = ["mp3", "flac", "wav"]
 
 
@@ -403,7 +430,7 @@ def get_ytmusic_format_keyboard():
     ])
 
 
-# --- YouTube Video/Playlist Format Selection (Inline Keyboard) ---
+# YouTube Video/Playlist Format Selection (Inline Keyboard)
 def get_youtube_format_keyboard():
     """Returns inline keyboard for YouTube video/playlist format selection."""
     return InlineKeyboardMarkup([
@@ -421,7 +448,7 @@ def get_youtube_audio_format_keyboard():
     ])
 
 
-# --- Save pending YouTube link for user on each message (stateless each time) ---
+# Save pending YouTube link for user on each message (stateless each time)
 # Use context.user_data["pending_ytmusic_url"] and context.user_data["pending_youtube_url"]
 
 
@@ -560,7 +587,11 @@ async def ytmusic_format_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("❌ Could not find the original link.")
         return
     await query.edit_message_text(f"✅ Format: {fmt.upper()}\nDownload starting...", reply_markup=None)
-    await handle_youtube_music_audio_download(update, context, url, fmt)
+    task_id = register_task(f"🎵 YT Music ({fmt.upper()})")
+    try:
+        await handle_youtube_music_audio_download(update, context, url, fmt)
+    finally:
+        unregister_task(task_id)
 
 
 async def youtube_format_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -582,16 +613,20 @@ async def youtube_format_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if format_type == "video":
         await query.edit_message_text("✅ Video format selected\nDownload starting...", reply_markup=None)
-        # Handle video download (existing functionality)
-        if is_playlist:
-            # Extract playlist info again for video download
-            ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
-            info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
-            await process_playlist(url, info_dict, context, query.message)
-        else:
-            status_msg = query.message
-            video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
-            await _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, query.message.chat_id)
+        task_id = register_task("📹 YouTube Video")
+        try:
+            # Handle video download (existing functionality)
+            if is_playlist:
+                # Extract playlist info again for video download
+                ydl_opts_check = {'quiet': True, 'extract_flat': True, 'force_generic_extractor': False}
+                info_dict = await asyncio.to_thread(lambda: yt_dlp.YoutubeDL(ydl_opts_check).extract_info(url, download=False))
+                await process_playlist(url, info_dict, context, query.message)
+            else:
+                status_msg = query.message
+                video_path, uploader, title, temp_dir, thumb_path = await download_single_video(url, context, status_msg)
+                await _handle_video_result(video_path, uploader, title, temp_dir, thumb_path, url, context, status_msg, query.message.chat_id)
+        finally:
+            unregister_task(task_id)
 
     elif format_type == "audio":
         # Store the URL and playlist info for audio format selection
@@ -618,7 +653,11 @@ async def youtube_audio_format_callback(update: Update, context: ContextTypes.DE
         return
 
     await query.edit_message_text(f"✅ Audio Format: {fmt.upper()}\nDownload starting...", reply_markup=None)
-    await handle_youtube_audio_download(update, context, url, fmt, is_playlist)
+    task_id = register_task(f"🎧 YouTube Audio ({fmt.upper()})")
+    try:
+        await handle_youtube_audio_download(update, context, url, fmt, is_playlist)
+    finally:
+        unregister_task(task_id)
 
 
 async def process_audio_playlist(url: str, context: ContextTypes.DEFAULT_TYPE, msg, fmt: str):
@@ -949,7 +988,7 @@ async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path
                             caption=caption,
                             parse_mode='MarkdownV2',
                             thumbnail=thumb_obj,
-                            write_timeout=60
+                            write_timeout=600
                         )
                     finally:
                         if thumb_obj:
@@ -983,7 +1022,7 @@ async def _handle_video_result(video_path, uploader, title, temp_dir, thumb_path
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# --- Telegram Bot Handlers ---
+# Telegram Bot Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the /start command with a welcome message."""
     welcome_text = (
@@ -1058,7 +1097,11 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Handle Instagram links (direct download with enhanced features)
         if "instagram.com" in url:
-            await handle_instagram_content(update, context, url, status_msg)
+            task_id = register_task("📸 Instagram download")
+            try:
+                await handle_instagram_content(update, context, url, status_msg)
+            finally:
+                unregister_task(task_id)
             return
 
         # Handle YouTube links (video/audio choice)
@@ -1104,7 +1147,92 @@ async def url_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-# --- Run Bot ---
+async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin-only /ping command showing bot status, system info, and active tasks."""
+    user_id = update.effective_user.id
+
+    # If ADMIN_ID isn't configured yet, show the user their ID so they can set it
+    if ADMIN_ID == 0:
+        await update.message.reply_text(
+            f"⚠️ ADMIN_ID not set in .env\n"
+            f"Your Telegram ID is: {user_id}\n"
+            f"Add ADMIN_ID = {user_id} to your .env file."
+        )
+        return
+
+    # Only the admin can use this command
+    if user_id != ADMIN_ID:
+        return
+
+    # Measure API ping
+    start = time.monotonic()
+    await context.bot.get_me()
+    ping_ms = (time.monotonic() - start) * 1000
+
+    # System info
+    cpu_percent = psutil.cpu_percent(interval=0.5)
+    mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    process = psutil.Process()
+    bot_mem_mb = process.memory_info().rss / (1024 * 1024)
+    bot_cpu = process.cpu_percent(interval=0.1)
+
+    # Network speed (measure over 1 second)
+    net_before = psutil.net_io_counters()
+    await asyncio.sleep(1)
+    net_after = psutil.net_io_counters()
+    dl_speed = (net_after.bytes_recv - net_before.bytes_recv) / 1024  # KB/s
+    ul_speed = (net_after.bytes_sent - net_before.bytes_sent) / 1024  # KB/s
+    dl_str = f"{dl_speed/1024:.2f} MB/s" if dl_speed >= 1024 else f"{dl_speed:.1f} KB/s"
+    ul_str = f"{ul_speed/1024:.2f} MB/s" if ul_speed >= 1024 else f"{ul_speed:.1f} KB/s"
+
+    # Uptime
+    uptime_sec = int(time.time() - BOT_START_TIME)
+    days, rem = divmod(uptime_sec, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    uptime_parts = []
+    if days > 0:
+        uptime_parts.append(f"{days}d")
+    uptime_parts.append(f"{hours}h {minutes}m {seconds}s")
+    uptime_str = " ".join(uptime_parts)
+
+    # Active tasks
+    if active_tasks:
+        tasks_lines = []
+        for tid, task in active_tasks.items():
+            elapsed = int(time.time() - task["started"])
+            mins, secs = divmod(elapsed, 60)
+            time_str = f"{mins}m {secs}s" if mins > 0 else f"{secs}s"
+            tasks_lines.append(f"  • {task['desc']} \\({md2(time_str)}\\)")
+        tasks_text = "\n".join(tasks_lines)
+    else:
+        tasks_text = "  _None_"
+
+    # API mode
+    api_mode = "🏠 Localhost" if USE_LOCAL_API else "☁️ Official"
+
+    text = (
+        f"🏓 *Pong\\!*\n\n"
+        f"⏱ *API Ping:* {md2(f'{ping_ms:.0f}')}ms\n"
+        f"🕐 *Uptime:* {md2(uptime_str)}\n"
+        f"🌐 *API Mode:* {api_mode}\n"
+        f"🖥 *OS:* {md2(platform.system())} {md2(platform.release())}\n\n"
+        f"📊 *System:*\n"
+        f"  💻 CPU: {md2(f'{cpu_percent}%')}\n"
+        f"  🧠 RAM: {md2(f'{mem.used/(1024**3):.1f}')}/{md2(f'{mem.total/(1024**3):.1f}')} GB \\({md2(f'{mem.percent}%')}\\)\n"
+        f"  💾 Disk: {md2(f'{disk.used/(1024**3):.1f}')}/{md2(f'{disk.total/(1024**3):.1f}')} GB \\({md2(f'{disk.percent}%')}\\)\n"
+        f"  ⬇️ Download: {md2(dl_str)}\n"
+        f"  ⬆️ Upload: {md2(ul_str)}\n\n"
+        f"🤖 *Bot Process:*\n"
+        f"  RAM: {md2(f'{bot_mem_mb:.1f}')} MB\n"
+        f"  CPU: {md2(f'{bot_cpu}%')}\n\n"
+        f"📋 *Active Tasks \\({md2(str(len(active_tasks)))}\\):*\n{tasks_text}"
+    )
+    await update.message.reply_text(text, parse_mode='MarkdownV2')
+
+
+# Run Bot
 def main():
     print("🤖 Starting Enhanced Telegram Media Downloader Bot...")
     if not BOT_TOKEN:
@@ -1119,18 +1247,31 @@ def main():
         print("   Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD environment variables for full access")
 
     # Build the bot application.
-    app = (
+    builder = (
         Application.builder()
         .token(BOT_TOKEN)
+        .concurrent_updates(True)
         .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .build()
+        .read_timeout(300)
+        .write_timeout(300)
     )
+
+    # Point to self-hosted Bot API server if enabled
+    if USE_LOCAL_API:
+        base_url = f"{LOCAL_API_SERVER}/bot"
+        base_file_url = f"{LOCAL_API_SERVER}/file/bot"
+        builder = builder.base_url(base_url).base_file_url(base_file_url).local_mode(True)
+        print(f"🏠 Using Local Bot API Server: {LOCAL_API_SERVER}")
+        print(f"📦 Max file size: {MAX_FILE_SIZE_MB} MB (2GB limit)")
+    else:
+        print(f"☁️  Using Official Telegram API (50MB limit)")
+
+    app = builder.build()
 
     # Register the command and message handlers.
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_handler))
+    app.add_handler(CommandHandler("ping", ping_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, url_handler))
     app.add_handler(CallbackQueryHandler(ytmusic_format_callback, pattern=r"^ytmusicfmt\|"))
     app.add_handler(CallbackQueryHandler(youtube_format_callback, pattern=r"^ytfmt\|"))

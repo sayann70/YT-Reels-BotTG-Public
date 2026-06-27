@@ -5,3 +5,4 @@ requests
 yt-dlp
 python-dotenv
 instaloader
+psutil
